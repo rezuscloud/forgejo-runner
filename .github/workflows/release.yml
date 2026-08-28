@@ -1,0 +1,120 @@
+# Fork addition (rezuscloud): darwin release binaries.
+#
+# Upstream (code.forgejo.org/forgejo/runner) ships linux-only release assets —
+# its build-release.yml passes `platforms: linux/amd64,linux/arm64` to the
+# shared forgejo-build-publish action, so no darwin binaries exist at any
+# upstream version. Gitea's runner (same lineage) publishes darwin-amd64 and
+# darwin-arm64 in every release; this workflow restores that coverage for the
+# Forgejo runner.
+#
+# Trigger: fork tags v*-rezus.* (upstream tags v12.7.3 etc. stay untouched and
+# inert on GitHub — upstream's own .forgejo/ CI only runs on code.forgejo.org).
+name: release
+
+on:
+  push:
+    tags: ["v*-rezus.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp, e.g. 12.7.3-rezus.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            v='${{ inputs.version }}'
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          # guard: fork tag shape vX.Y.Z-rezus.N
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9.]+)*-rezus\.[0-9]+$ ]] || {
+            echo "ERROR: version '$v' is not <upstream>-rezus.<N>" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      # The module path is major-version dependent (…/runner/v12, v13, …);
+      # derive it so the same workflow survives upstream majors.
+      - name: Resolve ldflags target
+        id: mod
+        run: echo "verpath=$(go list -m)/internal/pkg/ver" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          CGO_ENABLED=0 go build -tags 'netgo osusergo' -trimpath \
+            -ldflags "-s -w -X ${{ steps.mod.outputs.verpath }}.version=v${{ steps.ver.outputs.version }}" \
+            -o forgejo-runner .
+          ./forgejo-runner --version 2>/dev/null || true   # cross-compiled: cannot exec on runner
+
+      - name: Package
+        run: |
+          v='${{ steps.ver.outputs.version }}'
+          name="forgejo-runner-${v}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p out
+          tar -czf "out/${name}.tar.gz" forgejo-runner
+          sha256sum "out/${name}.tar.gz" > "out/${name}.tar.gz.sha256"
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: out/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            v='${{ inputs.version }}'
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v='${{ steps.ver.outputs.version }}'
+          sha256sum dist/forgejo-runner-*.tar.gz > dist/checksums.txt
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "forgejo-runner ${v} (darwin)" \
+            --notes "Fork release of upstream forgejo/runner adding **darwin** binaries (upstream ships linux-only).
+
+          - Source: upstream tag \`v${v%-rezus.*}\` + fork release workflow
+          - Assets: darwin/amd64 + darwin/arm64 tar.gz, each with .sha256, plus checksums.txt
+          - Deployment logic: \`runners/macos/\` in the forgejo monorepo (rezuscloud/forgejo)" \
+            dist/forgejo-runner-*.tar.gz dist/forgejo-runner-*.tar.gz.sha256 dist/checksums.txt
