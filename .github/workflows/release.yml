@@ -75,7 +75,7 @@ jobs:
           name="forgejo-runner-${v}-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p out
           tar -czf "out/${name}.tar.gz" forgejo-runner
-          sha256sum "out/${name}.tar.gz" > "out/${name}.tar.gz.sha256"
+          ( cd out && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
           ls -la out/
 
       - uses: actions/upload-artifact@v4
