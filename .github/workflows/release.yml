@@ -109,7 +109,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v='${{ steps.ver.outputs.version }}'
-          sha256sum dist/forgejo-runner-*.tar.gz > dist/checksums.txt
+          # bare filenames in checksums: cd into the dir so sha256sum does not
+          # embed the CI path (out/…) into the .sha256 assets
+          ( cd dist && sha256sum forgejo-runner-*.tar.gz > checksums.txt )
           gh release create "${GITHUB_REF_NAME}" \
             --title "forgejo-runner ${v} (darwin)" \
             --notes "Fork release of upstream forgejo/runner adding **darwin** binaries (upstream ships linux-only).
